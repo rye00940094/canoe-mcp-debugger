@@ -227,6 +227,17 @@ server.registerTool('canoe_list_test_modules', {
   inputSchema: {}
 }, async () => textResult(await runBridge('list_test_modules', {}, 60_000)));
 
+server.registerTool('canoe_set_test_module_enabled', {
+  description: 'Enable or disable a test module while measurement is stopped.',
+  inputSchema: {
+    environment: z.string().optional().describe('Test environment name. Optional if module name is unique.'),
+    module: z.string().optional().describe('Test module name. Optional when using moduleIndex.'),
+    environmentIndex: z.number().int().positive().optional().describe('1-based test environment index'),
+    moduleIndex: z.number().int().positive().optional().describe('1-based test module index within selected environment'),
+    enabled: z.boolean().default(true).describe('Target Enabled state')
+  }
+}, async (args) => textResult(await runBridge('set_test_module_enabled', args, 60_000)));
+
 server.registerTool('canoe_start_test_module', {
   description: 'Start a test module by environment/module name or index.',
   inputSchema: {
@@ -256,6 +267,14 @@ server.registerTool('canoe_wait_test_module', {
     timeoutMs: z.number().int().positive().default(120000).describe('How long to wait for TestModule.OnStop')
   }
 }, async (args) => textResult(await runBridge('wait_test_module', args, 150_000)));
+
+server.registerTool('canoe_execute_test_environment', {
+  description: 'Start all test modules in a test environment consecutively via TestEnvironment.ExecuteAll(). Requires measurement running.',
+  inputSchema: {
+    environment: z.string().optional().describe('Test environment name. Optional when using environmentIndex.'),
+    environmentIndex: z.number().int().positive().optional().describe('1-based test environment index')
+  }
+}, async (args) => textResult(await runBridge('execute_test_environment', args, 90_000)));
 
 server.registerTool('canoe_snapshot', {
   description: 'Collect a compact interactive debug snapshot: status, Write Window tail, and test module list.',
