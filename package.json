@@ -1,0 +1,31 @@
+{
+  "name": "canoe-mcp-debugger",
+  "version": "0.1.0",
+  "description": "Interactive MCP server for debugging Vector CANoe projects through COM.",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "canoe-mcp-debugger": "src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "inspect:tools": "node scripts/smoke-list-tools.js",
+    "test": "node scripts/smoke-list-tools.js"
+  },
+  "keywords": [
+    "mcp",
+    "canoe",
+    "vector",
+    "com",
+    "debugging"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.21.3",
+    "zod": "^4.1.13"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
