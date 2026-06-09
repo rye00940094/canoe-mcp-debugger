@@ -41,11 +41,13 @@ function Get-WriteText($app, [int]$tailLines = 120) {
 
 function Get-ProcessInfo {
   @(Get-Process CANoe64, CANoe32, RuntimeKernel -ErrorAction SilentlyContinue | ForEach-Object {
+    $processPath = $null
+    try { $processPath = $_.Path } catch {}
     [ordered]@{
       name = $_.ProcessName
       id = $_.Id
       responding = $_.Responding
-      path = try { $_.Path } catch { $null }
+      path = $processPath
       mainWindowTitle = $_.MainWindowTitle
     }
   })
@@ -75,26 +77,48 @@ function Wait-Until([scriptblock]$predicate, [int]$timeoutMs) {
   return $false
 }
 
+function Invoke-ComMethod($target, [string]$methodName, [object[]]$arguments = @()) {
+  return $target.GetType().InvokeMember(
+    $methodName,
+    [Reflection.BindingFlags]::InvokeMethod,
+    $null,
+    $target,
+    $arguments
+  )
+}
+
 function Get-TestEnvironments($app) {
   $items = @()
   $envs = $app.Configuration.TestSetup.TestEnvironments
   for ($envIndex = 1; $envIndex -le $envs.Count; $envIndex++) {
     $env = $envs.Item($envIndex)
+    $envName = $null
+    $envFullName = $null
+    try { $envName = $env.Name } catch {}
+    try { $envFullName = $env.FullName } catch {}
     $modules = @()
     for ($moduleIndex = 1; $moduleIndex -le $env.TestModules.Count; $moduleIndex++) {
       $module = $env.TestModules.Item($moduleIndex)
+      $moduleName = $null
+      $moduleFullName = $null
+      $moduleEnabled = $null
+      $moduleStartOnMeasurement = $null
+      try { $moduleName = $module.Name } catch {}
+      try { $moduleFullName = $module.FullName } catch {}
+      try { $moduleEnabled = [bool]$module.Enabled } catch {}
+      try { $moduleStartOnMeasurement = [bool]$module.StartOnMeasurement } catch {}
       $modules += [ordered]@{
         index = $moduleIndex
-        name = try { $module.Name } catch { $null }
-        fullName = try { $module.FullName } catch { $null }
-        enabled = try { [bool]$module.Enabled } catch { $null }
-        startOnMeasurement = try { [bool]$module.StartOnMeasurement } catch { $null }
+        name = $moduleName
+        fullName = $moduleFullName
+        enabled = $moduleEnabled
+        startOnMeasurement = $moduleStartOnMeasurement
       }
     }
     $items += [ordered]@{
       index = $envIndex
-      name = try { $env.Name } catch { $null }
-      fullName = try { $env.FullName } catch { $null }
+      name = $envName
+      fullName = $envFullName
       modules = $modules
     }
   }
@@ -155,7 +179,7 @@ try {
     }
     'compile_capl' {
       $app = Get-CANoeApp $false
-      $app.CAPL.Compile($null)
+      Invoke-ComMethod $app.CAPL 'Compile'
       Result $true ([ordered]@{ writeWindowTail = Get-WriteText $app 120 }) 'CAPL compile requested'
     }
     'start_measurement' {
@@ -166,7 +190,7 @@ try {
     }
     'stop_measurement' {
       $app = Get-CANoeApp $false
-      if ($app.Measurement.Running) { $app.Measurement.Stop() }
+      if ($app.Measurement.Running) { Invoke-ComMethod $app.Measurement 'StopEx' }
       $stopped = Wait-Until { -not $app.Measurement.Running } ([int]$request.timeoutMs)
       Result $stopped ([ordered]@{ measurementRunning = [bool]$app.Measurement.Running; writeWindowTail = Get-WriteText $app 120 }) $(if ($stopped) { 'measurement stopped' } else { 'measurement did not stop before timeout' })
     }
@@ -194,7 +218,8 @@ try {
       $app = Get-CANoeApp $false
       $fn = $app.CAPL.GetFunction([string]$request.functionName)
       $args = @($request.args)
-      $returnValue = if ($args.Count -eq 0) { $fn.Call() } else { $fn.Call($args) }
+      if ($args.Count -gt 10) { throw 'CAPLFunction.Call supports at most 10 parameters' }
+      $returnValue = Invoke-ComMethod $fn 'Call' $args
       Result $true ([ordered]@{ functionName = $request.functionName; returnValue = $returnValue; writeWindowTail = Get-WriteText $app 80 })
     }
     'list_test_modules' {
