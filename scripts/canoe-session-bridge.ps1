@@ -28,6 +28,149 @@ function SetSv($app,$ns,$var,$val){ $v=$app.System.Namespaces.Item($ns).Variable
 function InvokeComMethod($target, [string]$methodName, [object[]]$arguments = @()){
   return $target.GetType().InvokeMember($methodName, [Reflection.BindingFlags]::InvokeMethod, $null, $target, $arguments)
 }
+function GetWriteWindowDelta([string]$before, [string]$after) {
+  if([string]::IsNullOrEmpty($after)) { return '' }
+  if([string]::IsNullOrEmpty($before)) { return $after }
+  if($after.StartsWith($before)) { return $after.Substring($before.Length) }
+  return $after
+}
+
+function HasTestcaseWriteEvidence([string]$deltaTail) {
+  if([string]::IsNullOrWhiteSpace($deltaTail)) { return $false }
+  return ($deltaTail -match '\[AGC_[A-Z0-9_]+\]') -or ($deltaTail -match 'TC_[A-Za-z0-9_]+') -or ($deltaTail -match 'TestCase|testcase')
+}
+
+function GetModuleEvidence($app, $module) {
+  $evidence = [ordered]@{
+    name = Safe { [string]$module.Name }
+    fullName = Safe { [string]$module.FullName }
+    path = Safe { [string]$module.Path }
+    enabled = Safe { [bool]$module.Enabled }
+    running = Safe { [string]$module.Running }
+    verdict = Safe { [string]$module.Verdict }
+    writeWindowTail = WriteTail $app 12000
+  }
+  try {
+    $report = $module.Report
+    $evidence.reportFullName = Safe { [string]$report.FullName }
+    $evidence.reportLastWrittenFullName = Safe { [string]$report.LastWrittenFullName }
+    $evidence.reportAutoNumbering = Safe { [bool]$report.AutoNumbering }
+    $evidence.reportFormat = Safe { [string]$report.ReportFormat }
+  } catch {
+    $evidence.reportError = $_.Exception.Message
+  }
+  return $evidence
+}
+
+function EnsureModuleEnabled($app, $module) {
+  $enabled = Safe { [bool]$module.Enabled } $false
+  if($enabled){ return [ordered]@{ changed = $false; enabled = $true } }
+  if($app.Measurement.Running){
+    throw 'module is disabled while measurement is running; enable it before starting measurement or use a dedicated enable step'
+  }
+  $module.Enabled = $true
+  return [ordered]@{ changed = $true; enabled = Safe { [bool]$module.Enabled } $true }
+}
+
+function StartTestModuleStrict($app, $module, [int]$timeoutMs = 60000) {
+  $beforeVerdict = Safe { [string]$module.Verdict } ''
+  $beforeRunning = Safe { [string]$module.Running } ''
+  $beforeReport = Safe { [string]$module.Report.LastWrittenFullName } ''
+  $beforeWriteTail = WriteTail $app 12000
+  try {
+    $module.Start()
+  } catch {
+    return [ordered]@{
+      ok = $false
+      error = $_.Exception.Message
+      beforeVerdict = $beforeVerdict
+      beforeRunning = $beforeRunning
+      beforeReportLastWrittenFullName = $beforeReport
+      evidence = GetModuleEvidence $app $module
+    }
+  }
+
+  $sw=[Diagnostics.Stopwatch]::StartNew()
+  $startObserved = $false
+  $stopObserved = $false
+  $lastRunning = ''
+  $lastVerdict = ''
+  $lastReport = ''
+  do {
+    Start-Sleep -Milliseconds 250
+    $lastRunning = Safe { [string]$module.Running } ''
+    $lastVerdict = Safe { [string]$module.Verdict } ''
+    $lastReport = Safe { [string]$module.Report.LastWrittenFullName } ''
+    if($lastRunning -eq 'True' -or $lastRunning -eq '1'){ $startObserved = $true }
+    if($startObserved -and ($lastRunning -eq '' -or $lastRunning -eq 'False' -or $lastRunning -eq '0')){ $stopObserved = $true; break }
+  } while($sw.ElapsedMilliseconds -lt $timeoutMs)
+
+  $evidence = GetModuleEvidence $app $module
+  $writeDelta = GetWriteWindowDelta $beforeWriteTail ([string]$evidence.writeWindowTail)
+  $writeEvidence = HasTestcaseWriteEvidence $writeDelta
+  $reportEvidence = -not [string]::IsNullOrWhiteSpace([string]$evidence.reportLastWrittenFullName)
+  $verdictChanged = ($beforeVerdict -ne $lastVerdict) -and -not [string]::IsNullOrWhiteSpace($lastVerdict)
+  $ran = $startObserved -or $stopObserved -or $writeEvidence -or $reportEvidence -or $verdictChanged
+
+  return [ordered]@{
+    ok = [bool]$ran
+    ran = [bool]$ran
+    startObserved = $startObserved
+    stopObserved = $stopObserved
+    beforeVerdict = $beforeVerdict
+    afterVerdict = $lastVerdict
+    beforeRunning = $beforeRunning
+    afterRunning = $lastRunning
+    beforeReportLastWrittenFullName = $beforeReport
+    afterReportLastWrittenFullName = $lastReport
+    elapsedMs = $sw.ElapsedMilliseconds
+    writeDelta = $writeDelta
+    writeEvidence = $writeEvidence
+    reportEvidence = $reportEvidence
+    verdictChanged = $verdictChanged
+    evidence = $evidence
+    error = if(-not $ran){ 'test module did not produce execution evidence' } else { $null }
+  }
+}
+
+function WaitTestModuleStrict($app, $module, [int]$timeoutMs = 120000) {
+  $sw=[Diagnostics.Stopwatch]::StartNew()
+  $seenStart = $false
+  $lastRunning = ''
+  $lastVerdict = ''
+  $lastReport = ''
+  $beforeWriteTail = WriteTail $app 12000
+  do {
+    Start-Sleep -Milliseconds 500
+    $lastRunning = Safe { [string]$module.Running } ''
+    $lastVerdict = Safe { [string]$module.Verdict } ''
+    $lastReport = Safe { [string]$module.Report.LastWrittenFullName } ''
+    if($lastRunning -eq 'True' -or $lastRunning -eq '1'){ $seenStart = $true }
+    if($seenStart -and ($lastRunning -eq '' -or $lastRunning -eq 'False' -or $lastRunning -eq '0')){ break }
+  } while($sw.ElapsedMilliseconds -lt $timeoutMs)
+
+  $evidence = GetModuleEvidence $app $module
+  $writeDelta = GetWriteWindowDelta $beforeWriteTail ([string]$evidence.writeWindowTail)
+  $writeEvidence = HasTestcaseWriteEvidence $writeDelta
+  $reportEvidence = -not [string]::IsNullOrWhiteSpace([string]$evidence.reportLastWrittenFullName)
+  $verdictChanged = -not [string]::IsNullOrWhiteSpace($lastVerdict) -and ($lastVerdict -ne '0')
+  $ok = $seenStart -or $reportEvidence -or $verdictChanged -or $writeEvidence
+
+  return [ordered]@{
+    ok = [bool]$ok
+    seenStart = $seenStart
+    running = $lastRunning
+    verdict = $lastVerdict
+    elapsedMs = $sw.ElapsedMilliseconds
+    writeDelta = $writeDelta
+    writeEvidence = $writeEvidence
+    reportEvidence = $reportEvidence
+    verdictChanged = $verdictChanged
+    evidence = $evidence
+    error = if(-not $ok){ 'test module did not show execution evidence' } else { $null }
+  }
+}
+
 function GetTestEnvs($app){
   $out=@(); $envs=$app.Configuration.TestSetup.TestEnvironments
   for($i=1;$i -le $envs.Count;$i++){
@@ -95,8 +238,8 @@ function InvokeRequest($req){
     'wait_measurement' { $a=GetApp $false; $to=if($req.timeoutMs){[int]$req.timeoutMs}else{30000}; $state=if($req.state){[string]$req.state}else{'started'}; if($state -eq 'stopped'){ $ok=WaitUntil { -not $a.Measurement.Running } $to } else { $ok=WaitUntil { $a.Measurement.Running } $to }; return Json $ok @{ measurementRunning=[bool]$a.Measurement.Running; targetState=$state; writeWindowTail=WriteTail $a 4000 } }
     'read_write_window' { $a=GetApp $false; $chars=if($req.maxChars){[int]$req.maxChars}elseif($req.tailLines){[int]$req.tailLines*120}else{12000}; return Json $true @{ text=WriteTail $a $chars } }
     'snapshot' { $a=GetApp $false; return Json $true @{ configuration=Safe{[string]$a.Configuration.FullName}; measurementRunning=Safe{[bool]$a.Measurement.Running}; testEnvironments=GetTestEnvs $a; writeWindowTail=WriteTail $a 12000 } }
-    'start_test_module' { $a=GetApp $false; $sel=SelectModule $a $req; $m=$sel.module; if(-not $a.Measurement.Running){ $m.Enabled=$true; try{$m.StartOnMeasurementStart=$false}catch{} }; $m.Start(); Start-Sleep -Milliseconds 300; return Json $true @{ environment=Safe{[string]$sel.env.Name}; module=Safe{[string]$m.Name}; fullName=Safe{[string]$m.FullName}; writeWindowTail=WriteTail $a 4000 } }
-    'wait_test_module' { $a=GetApp $false; $sel=SelectModule $a $req; $m=$sel.module; $to=if($req.timeoutMs){[int]$req.timeoutMs}else{120000}; $sw=[Diagnostics.Stopwatch]::StartNew(); $running='unknown'; do{ Start-Sleep -Milliseconds 500; $running=Safe{[string]$m.Running} 'unknown'; $verdict=Safe{[string]$m.Verdict} 'unknown' }while(($running -eq 'True' -or $running -eq '1' -or $running -eq 'unknown') -and $sw.ElapsedMilliseconds -lt $to); $ok=($running -ne 'True' -and $running -ne '1' -and $running -ne 'unknown'); return Json $ok @{ module=Safe{[string]$m.Name}; running=$running; verdict=$verdict; elapsedMs=$sw.ElapsedMilliseconds; writeWindowTail=WriteTail $a 12000 } }
+    'start_test_module' { $a=GetApp $false; $sel=SelectModule $a $req; $m=$sel.module; $enableResult = EnsureModuleEnabled $a $m; if(-not $a.Measurement.Running){ try{$m.StartOnMeasurementStart=$false}catch{} }; $to=if($req.timeoutMs){[int]$req.timeoutMs}else{60000}; $r=StartTestModuleStrict $a $m $to; return Json ([bool]$r.ok) ([ordered]@{ environment=Safe{[string]$sel.env.Name}; module=Safe{[string]$m.Name}; fullName=Safe{[string]$m.FullName}; enableResult=$enableResult; startResult=$r; writeWindowTail=WriteTail $a 4000 }) }
+    'wait_test_module' { $a=GetApp $false; $sel=SelectModule $a $req; $m=$sel.module; $to=if($req.timeoutMs){[int]$req.timeoutMs}else{120000}; $r=WaitTestModuleStrict $a $m $to; return Json ([bool]$r.ok) ([ordered]@{ module=Safe{[string]$m.Name}; environment=Safe{[string]$sel.env.Name}; waitResult=$r; running=$r.running; verdict=$r.verdict; elapsedMs=$r.elapsedMs; writeWindowTail=WriteTail $a 12000 }) }
     default { return Json $false @{ error="unknown action: $($req.action)" } }
   }
 }
