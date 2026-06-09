@@ -171,13 +171,28 @@ function WaitTestModuleStrict($app, $module, [int]$timeoutMs = 120000) {
   }
 }
 
+function GetStartOnMeasurementValue($module) {
+  $value = Safe { [bool]$module.StartOnMeasurement } $null
+  if($null -ne $value) { return $value }
+  return Safe { [bool]$module.StartOnMeasurementStart } $null
+}
+
+function SetStartOnMeasurementValue($module, [bool]$value) {
+  $done = $false
+  try { $module.StartOnMeasurement = $value; $done = $true } catch {}
+  if(-not $done) {
+    try { $module.StartOnMeasurementStart = $value; $done = $true } catch {}
+  }
+  if(-not $done) { throw 'could not set StartOnMeasurement property' }
+}
+
 function GetTestEnvs($app){
   $out=@(); $envs=$app.Configuration.TestSetup.TestEnvironments
   for($i=1;$i -le $envs.Count;$i++){
     $e=$envs.Item($i); $mods=@()
     for($j=1;$j -le $e.TestModules.Count;$j++){
       $m=$e.TestModules.Item($j)
-      $mods += [ordered]@{ index=$j; name=Safe{$m.Name}; fullName=Safe{$m.FullName}; path=Safe{$m.Path}; enabled=Safe{[bool]$m.Enabled}; verdict=Safe{[int]$m.Verdict}; startOnMeasurement=Safe{[bool]$m.StartOnMeasurementStart} }
+      $mods += [ordered]@{ index=$j; name=Safe{$m.Name}; fullName=Safe{$m.FullName}; path=Safe{$m.Path}; enabled=Safe{[bool]$m.Enabled}; verdict=Safe{[int]$m.Verdict}; startOnMeasurement=GetStartOnMeasurementValue $m }
     }
     $out += [ordered]@{ index=$i; name=Safe{$e.Name}; fullName=Safe{$e.FullName}; modules=$mods }
   }
@@ -238,7 +253,7 @@ function InvokeRequest($req){
     'wait_measurement' { $a=GetApp $false; $to=if($req.timeoutMs){[int]$req.timeoutMs}else{30000}; $state=if($req.state){[string]$req.state}else{'started'}; if($state -eq 'stopped'){ $ok=WaitUntil { -not $a.Measurement.Running } $to } else { $ok=WaitUntil { $a.Measurement.Running } $to }; return Json $ok @{ measurementRunning=[bool]$a.Measurement.Running; targetState=$state; writeWindowTail=WriteTail $a 4000 } }
     'read_write_window' { $a=GetApp $false; $chars=if($req.maxChars){[int]$req.maxChars}elseif($req.tailLines){[int]$req.tailLines*120}else{12000}; return Json $true @{ text=WriteTail $a $chars } }
     'snapshot' { $a=GetApp $false; return Json $true @{ configuration=Safe{[string]$a.Configuration.FullName}; measurementRunning=Safe{[bool]$a.Measurement.Running}; testEnvironments=GetTestEnvs $a; writeWindowTail=WriteTail $a 12000 } }
-    'start_test_module' { $a=GetApp $false; $sel=SelectModule $a $req; $m=$sel.module; $enableResult = EnsureModuleEnabled $a $m; if(-not $a.Measurement.Running){ try{$m.StartOnMeasurementStart=$false}catch{} }; $to=if($req.timeoutMs){[int]$req.timeoutMs}else{60000}; $r=StartTestModuleStrict $a $m $to; return Json ([bool]$r.ok) ([ordered]@{ environment=Safe{[string]$sel.env.Name}; module=Safe{[string]$m.Name}; fullName=Safe{[string]$m.FullName}; enableResult=$enableResult; startResult=$r; writeWindowTail=WriteTail $a 4000 }) }
+    'start_test_module' { $a=GetApp $false; $sel=SelectModule $a $req; $m=$sel.module; $enableResult = EnsureModuleEnabled $a $m; if(-not $a.Measurement.Running){ try{ SetStartOnMeasurementValue $m $false }catch{} }; $to=if($req.timeoutMs){[int]$req.timeoutMs}else{60000}; $r=StartTestModuleStrict $a $m $to; return Json ([bool]$r.ok) ([ordered]@{ environment=Safe{[string]$sel.env.Name}; module=Safe{[string]$m.Name}; fullName=Safe{[string]$m.FullName}; enableResult=$enableResult; startOnMeasurement=GetStartOnMeasurementValue $m; startResult=$r; writeWindowTail=WriteTail $a 4000 }) }
     'wait_test_module' { $a=GetApp $false; $sel=SelectModule $a $req; $m=$sel.module; $to=if($req.timeoutMs){[int]$req.timeoutMs}else{120000}; $r=WaitTestModuleStrict $a $m $to; return Json ([bool]$r.ok) ([ordered]@{ module=Safe{[string]$m.Name}; environment=Safe{[string]$sel.env.Name}; waitResult=$r; running=$r.running; verdict=$r.verdict; elapsedMs=$r.elapsedMs; writeWindowTail=WriteTail $a 12000 }) }
     default { return Json $false @{ error="unknown action: $($req.action)" } }
   }
