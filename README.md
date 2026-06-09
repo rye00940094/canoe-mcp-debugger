@@ -17,6 +17,8 @@ This server exposes CANoe as MCP tools so an agent can debug step-by-step instea
 - wait for measurement and test module COM events
 - collect a compact debug snapshot
 
+The MCP server keeps a persistent PowerShell COM session bridge alive for the lifetime of the MCP server. This is required for interactive debugging: `canoe_open_configuration` creates/attaches the CANoe COM object once, and later tools reuse the same CANoe instance instead of trying to recover it from another process.
+
 ## Requirements
 
 - Windows with Vector CANoe installed and COM registered
@@ -86,6 +88,7 @@ Restart Hermes after adding the config. Tools will appear with names similar to 
 ## CANoe notes
 
 - COM controls external CANoe automation; arbitrary CAN transmission should normally go through CAPL functions or signal/sysvar interaction.
+- The stdio MCP server is stateful by design. Restarting the MCP server loses the in-memory CANoe COM handle; call `canoe_open_configuration` again after a restart.
 - CAPL function handles must be valid in the loaded configuration; some workflows require preparation during `Measurement.OnInit`.
 - Measurement and test-module synchronization uses a VBScript helper with `WScript.ConnectObject`, matching CANoe COM examples for `Measurement.OnStart`, `Measurement.OnStop`, `TSTestModule.OnStart`, `TSTestModule.OnStop`, and `TSTestModule.OnVerdictFail`.
 - .NET modules execute in `RuntimeKernel.exe`; attach there for managed-code breakpoints.

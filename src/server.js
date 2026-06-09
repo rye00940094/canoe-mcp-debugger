@@ -2,6 +2,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import * as z from 'zod/v4';
@@ -9,12 +10,83 @@ import * as z from 'zod/v4';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const bridgeScript = resolve(__dirname, '..', 'scripts', 'canoe-bridge.ps1');
+const sessionBridgeScript = resolve(__dirname, '..', 'scripts', 'canoe-session-bridge.ps1');
 
 function psCommand() {
   return process.env.CANOE_MCP_POWERSHELL || 'powershell.exe';
 }
 
+let sessionBridge;
+
+function startSessionBridge() {
+  if (sessionBridge?.child && !sessionBridge.child.killed) return sessionBridge;
+
+  const child = spawn(psCommand(), [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    sessionBridgeScript
+  ], {
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+
+  const lines = [];
+  const waiters = [];
+  const rl = createInterface({ input: child.stdout });
+  let stderr = '';
+  rl.on('line', (line) => {
+    const waiter = waiters.shift();
+    if (waiter) waiter(line);
+    else lines.push(line);
+  });
+  child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+  child.on('close', () => {
+    while (waiters.length) waiters.shift()(null);
+  });
+
+  sessionBridge = { child, lines, waiters, stderr: () => stderr.trim() };
+  return sessionBridge;
+}
+
+function runSessionBridge(action, args = {}, timeoutMs = 120_000) {
+  return new Promise((resolvePromise) => {
+    const bridge = startSessionBridge();
+    const payload = JSON.stringify({ action, ...args });
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolvePromise({ ok: false, action, error: `Timeout after ${timeoutMs} ms`, stderr: bridge.stderr() || undefined });
+    }, timeoutMs);
+
+    const consume = (line) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (line === null) {
+        resolvePromise({ ok: false, action, error: 'Session bridge exited', stderr: bridge.stderr() || undefined });
+        return;
+      }
+      try {
+        const parsed = JSON.parse(line.trim());
+        resolvePromise({ action, ...parsed, stderr: bridge.stderr() || undefined, session: true });
+      } catch (error) {
+        resolvePromise({ ok: false, action, error: `Session bridge returned non-JSON line: ${error.message}`, stdout: line, stderr: bridge.stderr() || undefined, session: true });
+      }
+    };
+
+    if (bridge.lines.length) consume(bridge.lines.shift());
+    else bridge.waiters.push(consume);
+    bridge.child.stdin.write(payload + '\n');
+  });
+}
+
 function runBridge(action, args = {}, timeoutMs = 120_000) {
+  if (process.env.CANOE_MCP_LEGACY_BRIDGE !== '1') {
+    return runSessionBridge(action, args, timeoutMs);
+  }
   return new Promise((resolvePromise) => {
     const payload = JSON.stringify({ action, ...args });
     const child = spawn(psCommand(), [
