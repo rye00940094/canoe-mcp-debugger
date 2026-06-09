@@ -161,9 +161,29 @@ server.registerTool('canoe_start_test_module', {
     environment: z.string().optional().describe('Test environment name. Optional if module name is unique.'),
     module: z.string().optional().describe('Test module name. Optional when using moduleIndex.'),
     environmentIndex: z.number().int().positive().optional().describe('1-based test environment index'),
-    moduleIndex: z.number().int().positive().optional().describe('1-based test module index within selected environment')
+    moduleIndex: z.number().int().positive().optional().describe('1-based test module index within selected environment'),
+    timeoutMs: z.number().int().positive().default(30000).describe('How long to wait for TestModule.OnStart')
   }
 }, async (args) => textResult(await runBridge('start_test_module', args, 60_000)));
+
+server.registerTool('canoe_wait_measurement', {
+  description: 'Wait for a measurement state transition using CANoe COM event semantics.',
+  inputSchema: {
+    state: z.enum(['started', 'stopped']).default('started').describe('Target measurement state'),
+    timeoutMs: z.number().int().positive().default(30000).describe('How long to wait for the event')
+  }
+}, async (args) => textResult(await runBridge('wait_measurement', args, 90_000)));
+
+server.registerTool('canoe_wait_test_module', {
+  description: 'Wait for a test module to stop and return stop reason plus verdict when available.',
+  inputSchema: {
+    environment: z.string().optional().describe('Test environment name. Optional if module name is unique.'),
+    module: z.string().optional().describe('Test module name. Optional when using moduleIndex.'),
+    environmentIndex: z.number().int().positive().optional().describe('1-based test environment index'),
+    moduleIndex: z.number().int().positive().optional().describe('1-based test module index within selected environment'),
+    timeoutMs: z.number().int().positive().default(120000).describe('How long to wait for TestModule.OnStop')
+  }
+}, async (args) => textResult(await runBridge('wait_test_module', args, 150_000)));
 
 server.registerTool('canoe_snapshot', {
   description: 'Collect a compact interactive debug snapshot: status, Write Window tail, and test module list.',

@@ -14,6 +14,7 @@ This server exposes CANoe as MCP tools so an agent can debug step-by-step instea
 - read bus signals
 - call CAPL functions
 - list and start test modules
+- wait for measurement and test module COM events
 - collect a compact debug snapshot
 
 ## Requirements
@@ -66,23 +67,27 @@ Restart Hermes after adding the config. Tools will appear with names similar to 
 | `canoe_get_signal` | Read signal value |
 | `canoe_call_capl_function` | Call exposed CAPL function |
 | `canoe_list_test_modules` | Enumerate test modules |
-| `canoe_start_test_module` | Start selected test module |
+| `canoe_start_test_module` | Start selected test module and wait for `TSTestModule.OnStart` |
+| `canoe_wait_measurement` | Wait for `Measurement.OnStart` / `Measurement.OnStop` |
+| `canoe_wait_test_module` | Wait for `TSTestModule.OnStop` and return stop reason / verdict when available |
 | `canoe_snapshot` | Status + Write Window + test module snapshot |
 
 ## Typical interactive flow
 
 1. `canoe_open_configuration` with the project `.cfg` path.
 2. `canoe_compile_capl`.
-3. `canoe_start_measurement`.
+3. `canoe_start_measurement` or `canoe_wait_measurement` to synchronize with measurement state.
 4. `canoe_read_write_window` to inspect startup errors.
 5. `canoe_set_system_variable` / `canoe_call_capl_function` to drive the setup.
 6. `canoe_start_test_module` to run one module.
-7. `canoe_snapshot` after failures to decide the next action.
+7. `canoe_wait_test_module` to wait for completion and collect stop reason / verdict.
+8. `canoe_snapshot` after failures to decide the next action.
 
 ## CANoe notes
 
 - COM controls external CANoe automation; arbitrary CAN transmission should normally go through CAPL functions or signal/sysvar interaction.
 - CAPL function handles must be valid in the loaded configuration; some workflows require preparation during `Measurement.OnInit`.
+- Measurement and test-module synchronization uses a VBScript helper with `WScript.ConnectObject`, matching CANoe COM examples for `Measurement.OnStart`, `Measurement.OnStop`, `TSTestModule.OnStart`, `TSTestModule.OnStop`, and `TSTestModule.OnVerdictFail`.
 - .NET modules execute in `RuntimeKernel.exe`; attach there for managed-code breakpoints.
 - If multiple CANoe versions are installed, register/launch the intended CANoe version before using COM.
 

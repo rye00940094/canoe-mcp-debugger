@@ -5,6 +5,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$EventHelperPath = Join-Path $PSScriptRoot 'canoe-event-wait.vbs'
+$CscriptPath = Join-Path $env:SystemRoot 'System32\\cscript.exe'
+
 function ConvertTo-JsonSafe($value) {
   $value | ConvertTo-Json -Depth 12 -Compress
 }
@@ -20,6 +23,14 @@ function Fail($message, $extra = @{}) {
   $data = [ordered]@{ error = $message }
   foreach ($key in $extra.Keys) { $data[$key] = $extra[$key] }
   Result $false $data
+}
+
+function Get-SafeValue([scriptblock]$getter, $default = $null) {
+  try {
+    return & $getter
+  } catch {
+    return $default
+  }
 }
 
 function Get-CANoeApp($create = $true) {
@@ -85,6 +96,78 @@ function Invoke-ComMethod($target, [string]$methodName, [object[]]$arguments = @
     $target,
     $arguments
   )
+}
+
+function Invoke-EventWaitHelper([string[]]$arguments) {
+  if (-not (Test-Path -LiteralPath $EventHelperPath)) {
+    throw "Event helper not found: $EventHelperPath"
+  }
+
+  $output = & $CscriptPath '//nologo' $EventHelperPath @arguments 2>&1
+  $exitCode = $LASTEXITCODE
+  $text = ($output | Out-String).Trim()
+  if ([string]::IsNullOrWhiteSpace($text)) {
+    throw 'Event helper returned no output'
+  }
+
+  try {
+    $parsed = $text | ConvertFrom-Json
+  } catch {
+    throw "Event helper returned non-JSON stdout: $text"
+  }
+
+  if ($exitCode -ne 0 -and $parsed.ok) {
+    throw "Event helper exited with code $exitCode despite ok=true"
+  }
+
+  return $parsed
+}
+
+function Add-EventSelectorArguments([System.Collections.Generic.List[string]]$arguments, $request) {
+  if ($null -ne $request.environment -and [string]$request.environment -ne '') {
+    $arguments.Add("environment=$($request.environment)")
+  }
+  if ($null -ne $request.module -and [string]$request.module -ne '') {
+    $arguments.Add("module=$($request.module)")
+  }
+  if ($null -ne $request.environmentIndex) {
+    $arguments.Add("environmentIndex=$([int]$request.environmentIndex)")
+  }
+  if ($null -ne $request.moduleIndex) {
+    $arguments.Add("moduleIndex=$([int]$request.moduleIndex)")
+  }
+}
+
+function Get-RequestInt($request, [string]$propertyName, [int]$defaultValue) {
+  $property = $request.PSObject.Properties[$propertyName]
+  if ($null -eq $property -or $null -eq $property.Value -or [string]$property.Value -eq '') {
+    return $defaultValue
+  }
+  return [int]$property.Value
+}
+
+function Get-RequestString($request, [string]$propertyName, [string]$defaultValue) {
+  $property = $request.PSObject.Properties[$propertyName]
+  if ($null -eq $property -or $null -eq $property.Value -or [string]$property.Value -eq '') {
+    return $defaultValue
+  }
+  return [string]$property.Value
+}
+
+function Get-TestModuleSummary($module, $environment = $null) {
+  $summary = [ordered]@{
+    name = Get-SafeValue { $module.Name }
+    fullName = Get-SafeValue { $module.FullName }
+    path = Get-SafeValue { $module.Path }
+    enabled = Get-SafeValue { [bool]$module.Enabled }
+    startOnMeasurement = Get-SafeValue { [bool]$module.StartOnMeasurement }
+    verdict = Get-SafeValue { [int]$module.Verdict }
+  }
+  if ($environment) {
+    $summary.environment = Get-SafeValue { $environment.Name }
+    $summary.environmentFullName = Get-SafeValue { $environment.FullName }
+  }
+  return $summary
 }
 
 function Get-TestEnvironments($app) {
@@ -184,15 +267,29 @@ try {
     }
     'start_measurement' {
       $app = Get-CANoeApp $false
-      if (-not $app.Measurement.Running) { $app.Measurement.Start() }
-      $running = Wait-Until { $app.Measurement.Running } ([int]$request.timeoutMs)
-      Result $running ([ordered]@{ measurementRunning = [bool]$app.Measurement.Running; writeWindowTail = Get-WriteText $app 120 }) $(if ($running) { 'measurement started' } else { 'measurement did not start before timeout' })
+      if (-not $app.Measurement.Running) {
+        $args = [System.Collections.Generic.List[string]]::new()
+        $args.Add('mode=measurement-start')
+        $args.Add("timeoutMs=$(Get-RequestInt $request 'timeoutMs' 30000)")
+        $eventResult = Invoke-EventWaitHelper $args
+      } else {
+        $eventResult = [pscustomobject]@{ ok = $true; event = 'measurement-already-running'; measurementRunning = $true }
+      }
+      $running = [bool]$app.Measurement.Running
+      Result $running ([ordered]@{ measurementRunning = $running; eventResult = $eventResult; writeWindowTail = Get-WriteText $app 120 }) $(if ($running) { 'measurement started' } else { 'measurement did not start before timeout' })
     }
     'stop_measurement' {
       $app = Get-CANoeApp $false
-      if ($app.Measurement.Running) { Invoke-ComMethod $app.Measurement 'StopEx' }
-      $stopped = Wait-Until { -not $app.Measurement.Running } ([int]$request.timeoutMs)
-      Result $stopped ([ordered]@{ measurementRunning = [bool]$app.Measurement.Running; writeWindowTail = Get-WriteText $app 120 }) $(if ($stopped) { 'measurement stopped' } else { 'measurement did not stop before timeout' })
+      if ($app.Measurement.Running) {
+        $args = [System.Collections.Generic.List[string]]::new()
+        $args.Add('mode=measurement-stop')
+        $args.Add("timeoutMs=$(Get-RequestInt $request 'timeoutMs' 30000)")
+        $eventResult = Invoke-EventWaitHelper $args
+      } else {
+        $eventResult = [pscustomobject]@{ ok = $true; event = 'measurement-already-stopped'; measurementRunning = $false }
+      }
+      $stopped = -not [bool]$app.Measurement.Running
+      Result $stopped ([ordered]@{ measurementRunning = [bool]$app.Measurement.Running; eventResult = $eventResult; writeWindowTail = Get-WriteText $app 120 }) $(if ($stopped) { 'measurement stopped' } else { 'measurement did not stop before timeout' })
     }
     'read_write_window' {
       $app = Get-CANoeApp $false
@@ -229,8 +326,32 @@ try {
     'start_test_module' {
       $app = Get-CANoeApp $false
       $module = Select-TestModule $app $request
-      $module.Start()
-      Result $true ([ordered]@{ module = try { $module.Name } catch { $null }; writeWindowTail = Get-WriteText $app 120 }) 'test module start requested'
+      $args = [System.Collections.Generic.List[string]]::new()
+      $args.Add('mode=testmodule-start')
+      $args.Add("timeoutMs=$(Get-RequestInt $request 'timeoutMs' 30000)")
+      Add-EventSelectorArguments $args $request
+      $eventResult = Invoke-EventWaitHelper $args
+      Result ([bool]$eventResult.ok) ([ordered]@{ module = Get-TestModuleSummary $module; eventResult = $eventResult; writeWindowTail = Get-WriteText $app 120 }) 'test module start requested'
+    }
+    'wait_test_module' {
+      $app = Get-CANoeApp $false
+      $module = Select-TestModule $app $request
+      $args = [System.Collections.Generic.List[string]]::new()
+      $args.Add('mode=testmodule-wait-stop')
+      $args.Add("timeoutMs=$(Get-RequestInt $request 'timeoutMs' 120000)")
+      Add-EventSelectorArguments $args $request
+      $eventResult = Invoke-EventWaitHelper $args
+      Result ([bool]$eventResult.ok) ([ordered]@{ module = Get-TestModuleSummary $module; eventResult = $eventResult; writeWindowTail = Get-WriteText $app 120 }) 'test module wait completed'
+    }
+    'wait_measurement' {
+      $app = Get-CANoeApp $false
+      $targetState = Get-RequestString $request 'state' 'started'
+      $mode = if ($targetState -eq 'stopped') { 'measurement-stop' } else { 'measurement-start' }
+      $args = [System.Collections.Generic.List[string]]::new()
+      $args.Add("mode=$mode")
+      $args.Add("timeoutMs=$(Get-RequestInt $request 'timeoutMs' 30000)")
+      $eventResult = Invoke-EventWaitHelper $args
+      Result ([bool]$eventResult.ok) ([ordered]@{ measurementRunning = [bool]$app.Measurement.Running; eventResult = $eventResult; writeWindowTail = Get-WriteText $app 120 }) 'measurement wait completed'
     }
     'snapshot' {
       $app = $null
